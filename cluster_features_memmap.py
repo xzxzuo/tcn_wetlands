@@ -10,16 +10,6 @@ try:
 except ImportError:
     from utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata, iter_chunk_ranges
 
-def iter_chunk_ranges(n, batch_size, shuffle_chunks=False, seed=42):
-    starts = np.arange(0, n, batch_size)
-
-    if shuffle_chunks:
-        rng = np.random.default_rng(seed)
-        rng.shuffle(starts)
-
-    for start in starts:
-        end = min(start + batch_size, n)
-        yield int(start), int(end)
 
 def get_feature_batch(features, start, end, mean=None, std=None):
     x = np.asarray(features[start:end], dtype=np.float32)
@@ -201,27 +191,33 @@ def main():
         mean=mean,
         std=std,
     )
+    # Uncomment this if you want to save more metadata
+    # save_cluster_counts_csv(cluster_counts, output_dir / "cluster_counts.csv")
+    # np.save(output_dir / "cluster_centers.npy", kmeans.cluster_centers_)
+    # np.savez(
+    #     output_dir / "cluster_metadata.npz",
+    #     n_clusters=np.array(args.n_clusters, dtype=np.int64),
+    #     batch_size=np.array(args.batch_size, dtype=np.int64),
+    #     fit_epochs=np.array(args.fit_epochs, dtype=np.int64),
+    #     seed=np.array(args.seed, dtype=np.int64),
+    #     standardize=np.array(args.standardize),
+    #     feature_dir=np.array(str(feature_dir)),
+    #     features_shape=np.array(features.shape, dtype=np.int64),
+    #     height=np.array(height, dtype=np.int64),
+    #     width=np.array(width, dtype=np.int64),
+    #     mean=np.array([] if mean is None else mean, dtype=np.float32),
+    #     std=np.array([] if std is None else std, dtype=np.float32),
+    # )
 
-    save_cluster_counts_csv(cluster_counts, output_dir / "cluster_counts.csv")
-    np.save(output_dir / "cluster_centers.npy", kmeans.cluster_centers_)
-    np.savez(
-        output_dir / "cluster_metadata.npz",
-        n_clusters=np.array(args.n_clusters, dtype=np.int64),
-        batch_size=np.array(args.batch_size, dtype=np.int64),
-        fit_epochs=np.array(args.fit_epochs, dtype=np.int64),
-        seed=np.array(args.seed, dtype=np.int64),
-        standardize=np.array(args.standardize),
-        feature_dir=np.array(str(feature_dir)),
-        features_shape=np.array(features.shape, dtype=np.int64),
-        height=np.array(height, dtype=np.int64),
-        width=np.array(width, dtype=np.int64),
-        mean=np.array([] if mean is None else mean, dtype=np.float32),
-        std=np.array([] if std is None else std, dtype=np.float32),
-    )
+    feature_dim = int(meta['feature_dim'])
+    try:
+        half_life_days = int(float(meta["half_life_days"]))
+    except Exception:
+        half_life_days = -1
 
     save_preview_png(
         cluster_map_path=cluster_map_path,
-        output_png=output_dir / "cluster_map_preview.png",
+        output_png=output_dir / f"preview_k{args.n_clusters}_h{half_life_days}_d{feature_dim}.png",
         n_clusters=args.n_clusters,
         max_plot_size=args.max_plot_size,
     )
@@ -233,14 +229,18 @@ def main():
 
         save_geotiff(
             cluster_map_path=cluster_map_path, 
-            output_tif=output_dir / "cluster_map.tif", 
+            output_tif=output_dir / f"cluster_map_k{args.n_clusters}_h{half_life_days}_d{feature_dim}.tif", 
             reference_path=reference_path
         )
 
+    cluster_map.flush()
+    del cluster_map
+
+    if cluster_map_path.exists():
+        cluster_map_path.unlink()
+        
     print("Done.")
-    print(f"cluster_map.npy saved to: {cluster_map_path}")
-    print(f"cluster_map_preview.png saved to: {output_dir / 'cluster_map_preview.png'}")
-    print(f"cluster_counts.csv saved to: {output_dir / 'cluster_counts.csv'}")
+    print(f"cluster data saved to: {output_dir}")
 
 
 if __name__ == "__main__":
