@@ -6,9 +6,9 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import MiniBatchKMeans
 
 try:
-    from .utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata
+    from .utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata, iter_chunk_ranges
 except ImportError:
-    from utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata
+    from utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata, iter_chunk_ranges
 
 def iter_chunk_ranges(n, batch_size, shuffle_chunks=False, seed=42):
     starts = np.arange(0, n, batch_size)

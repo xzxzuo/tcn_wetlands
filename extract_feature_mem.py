@@ -160,7 +160,7 @@ def main():
         )
 
         print("Using recency input during feature extraction.")
-        print("Current test region: Orebro lan")
+        # print("Current test region: Orebro lan")
         print("Current input T:", T_current)
         print("Current recency dates:", recency_dates)
         print("Half-life days:", half_life_days)

@@ -373,3 +373,14 @@ def load_metadata(metadata_path):
         reference_path = str(meta["reference_path"].item())
 
     return meta, height, width, reference_path
+
+def iter_chunk_ranges(n, batch_size, shuffle_chunks=False, seed=42):
+    starts = np.arange(0, n, batch_size)
+
+    if shuffle_chunks:
+        rng = np.random.default_rng(seed)
+        rng.shuffle(starts)
+
+    for start in starts:
+        end = min(start + batch_size, n)
+        yield int(start), int(end)
