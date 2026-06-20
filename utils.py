@@ -4,6 +4,7 @@ import csv
 from glob import glob
 from pathlib import Path
 from rasterio.windows import Window
+from rasterio.warp import reproject, Resampling
 import re
 import numpy as np
 import rasterio
@@ -56,7 +57,7 @@ def percentile_normalize(image, valid_mask, lower=1.0, upper=99.0):
     return image.astype(np.float32)
 
 
-def read_sar_stack(paths, lower=1.0, upper=99.0):
+def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling="nearest", verbose=True):
     """
     Read co-registered single-band GeoTIFFs.
 
@@ -71,31 +72,79 @@ def read_sar_stack(paths, lower=1.0, upper=99.0):
     reference_shape = None
     reference_transform = None
     reference_crs = None
+    
+    paths = [str(p) for p in paths]
+    if reference_path is None:
+        reference_path = paths[0]
+
+    with rasterio.open(reference_path) as ref:
+        reference_profile = ref.profile.copy()
+        reference_shape = (ref.height, ref.width)
+        reference_transform = ref.transform
+        reference_crs = ref.crs
+    
+    if reference_crs is None:
+        raise ValueError(f"Reference image has no CRS: {reference_path}")
+
+    profile = reference_profile.copy()
+    profile.update(
+        dtype="float32",
+        count=1,
+        height=reference_shape[0],
+        width=reference_shape[1],
+        transform=reference_transform,
+        crs=reference_crs,
+        nodata=np.nan,
+    )
+
+    if resampling == "nearest":
+        resampling_method = Resampling.nearest
+    elif resampling == "bilinear":
+        resampling_method = Resampling.bilinear
+    else:
+        raise ValueError("resampling must be 'nearest' or 'bilinear'.")
 
     for path in paths:
         with rasterio.open(path) as src:
             image = src.read(1).astype(np.float32)
-            if profile is None:
-                profile = src.profile.copy()
-                reference_shape = image.shape
-                reference_transform = src.transform
-                reference_crs = src.crs
+            same_grid = (
+                image.shape == reference_shape
+                and src.transform == reference_transform
+                and src.crs == reference_crs
+            )
+            if same_grid:
+                aligned = image
             else:
-                if image.shape != reference_shape:
-                    raise ValueError(f"{path} has shape {image.shape}, expected {reference_shape}.")
-                if src.transform != reference_transform:
-                    raise ValueError(f"{path} has a different transform from the first image.")
-                if src.crs != reference_crs:
-                    raise ValueError(f"{path} has a different CRS from the first image.")
+                if verbose:
+                    print("[Aligning]", path, "shape", image.shape, "->", reference_shape, flush=True)
 
-            valid = np.isfinite(image)
+                aligned = np.full(reference_shape, np.nan, dtype=np.float32)
+                reproject(
+                    source=image,
+                    destination=aligned,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    src_nodata=src.nodata,
+                    dst_transform=reference_transform,
+                    dst_crs=reference_crs,
+                    dst_nodata=np.nan,
+                    resampling=resampling_method,
+                )
+            valid = np.isfinite(aligned)
             if src.nodata is not None:
-                valid &= image != src.nodata
+                valid &= aligned != src.nodata
 
-            arrays.append(image)
+            aligned = aligned.astype(np.float32)
+            aligned[~valid] = np.nan
+            arrays.append(aligned)
             masks.append(valid)
 
     valid_mask = np.logical_and.reduce(masks)
+    if int(valid_mask.sum()) == 0:
+        raise ValueError(
+            "Common valid_mask is empty after alignment. "
+            "Check whether the images actually overlap."
+        )
     normalized = [
         percentile_normalize(image, valid_mask & mask, lower=lower, upper=upper)
         for image, mask in zip(arrays, masks)
