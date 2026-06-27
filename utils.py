@@ -12,6 +12,7 @@ import torch
 from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
+from scipy.ndimage import gaussian_filter
 
 def set_seed(seed):
     random.seed(seed)
@@ -56,8 +57,25 @@ def percentile_normalize(image, valid_mask, lower=1.0, upper=99.0):
     image = np.clip(image, 0.0, 1.0)
     return image.astype(np.float32)
 
+def nan_gaussian_filter(image, valid, sigma=1.0, eps=1e-6):
+    """
+    Apply Gaussian blur without spreading NaN into valid pixels.
+    """
+    image = image.astype(np.float32)
+    valid = valid & np.isfinite(image)
 
-def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling="nearest", verbose=True):
+    filled = np.where(valid, image, 0.0).astype(np.float32)
+    weight = valid.astype(np.float32)
+
+    blurred_sum = gaussian_filter(filled, sigma=sigma, mode="nearest")
+    blurred_weight = gaussian_filter(weight, sigma=sigma, mode="nearest")
+
+    blurred = blurred_sum / (blurred_weight + eps)
+    blurred[~valid] = np.nan
+
+    return blurred.astype(np.float32)
+
+def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling="nearest", gaussian_sigma=1.0, verbose=True):
     """
     Read co-registered single-band GeoTIFFs.
 
@@ -136,6 +154,15 @@ def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling
 
             aligned = aligned.astype(np.float32)
             aligned[~valid] = np.nan
+            # Apply gaussian blur to input images
+            if gaussian_sigma is not None and gaussian_sigma > 0:
+                print("Applying Gaussian blur")
+                aligned = nan_gaussian_filter(
+                    image=aligned,
+                    valid=valid,
+                    sigma=gaussian_sigma,
+                )
+                valid = np.isfinite(aligned)
             arrays.append(aligned)
             masks.append(valid)
 

@@ -240,6 +240,7 @@ def main():
         cluster_map_path.unlink()
         
     print("Done.")
+    print(cluster_counts)
     print(f"cluster data saved to: {output_dir}")
 
 
