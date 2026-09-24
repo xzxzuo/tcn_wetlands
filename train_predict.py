@@ -6,34 +6,19 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-try:
-    from .dataset import SARPixelsDataset
-    from .model import SARPixelTCN, model_config
-    from .utils import (
-        collect_geotiff_paths,
-        make_tile_split,
-        parse_channels,
-        read_sar_stack,
-        save_json,
-        set_seed,
-        parse_dates,
-        make_causal_recency_matrix,
-        add_recency_weighted_channel,
-    )
-except ImportError:
-    from dataset import SARPixelsDataset
-    from model import SARPixelTCN, model_config
-    from utils import (
-        collect_geotiff_paths,
-        make_tile_split,
-        parse_channels,
-        read_sar_stack,
-        save_json,
-        set_seed,
-        parse_dates,
-        make_causal_recency_matrix,
-        add_recency_weighted_channel,
-    )
+from dataset import SARPixelsDataset
+from model import SARPixelTCN, model_config
+from utils import (
+    collect_geotiff_paths,
+    make_tile_split,
+    parse_channels,
+    read_sar_stack,
+    save_json,
+    set_seed,
+    parse_dates,
+    make_causal_recency_matrix,
+    add_recency_weighted_channel,
+)
 
 import dataset
 print("Dataset module file:", dataset.__file__, flush=True)
@@ -126,6 +111,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--tile-size", type=int, default=128)
     parser.add_argument("--val-fraction", type=float, default=0.20)
+    parser.add_argument("--normalization", default="zscore")
     parser.add_argument("--p-lower", type=float, default=1.0)
     parser.add_argument("--p-upper", type=float, default=99.0)
     parser.add_argument("--seed", type=int, default=42)
@@ -151,7 +137,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image_paths = collect_geotiff_paths(args.images)
-    stack, valid_mask, _ = read_sar_stack(image_paths, lower=args.p_lower, upper=args.p_upper)
+    # stack, valid_mask, _ = read_sar_stack(image_paths, lower=args.p_lower, upper=args.p_upper)
+    stack, valid_mask, profile = read_sar_stack(image_paths, normalization=args.normalization, zscore_clip=0)
     if stack.shape[0] < 2:
         raise ValueError("Need at least two time steps for next-step prediction.")
 

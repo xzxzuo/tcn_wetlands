@@ -1,12 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-
-try:
-    from .utils import collect_geotiff_paths, read_sar_stack, valid_pixel_coords
-except ImportError:
-    from utils import collect_geotiff_paths, read_sar_stack, valid_pixel_coords
-
+from utils import collect_geotiff_paths, read_sar_stack, valid_pixel_coords
 import time
 import resource
 

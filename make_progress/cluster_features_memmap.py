@@ -5,10 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.cluster import MiniBatchKMeans
 
-try:
-    from .utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata, iter_chunk_ranges
-except ImportError:
-    from utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata, iter_chunk_ranges
+from utils import save_preview_png, save_cluster_counts_csv, save_geotiff, compute_feature_mean_std, load_metadata, iter_chunk_ranges
 
 
 def get_feature_batch(features, start, end, mean=None, std=None):
@@ -191,7 +188,6 @@ def main():
         mean=mean,
         std=std,
     )
-    # Uncomment this if you want to save more metadata
     # save_cluster_counts_csv(cluster_counts, output_dir / "cluster_counts.csv")
     # np.save(output_dir / "cluster_centers.npy", kmeans.cluster_centers_)
     # np.savez(

@@ -26,20 +26,28 @@ def parse_channels(value):
 
 def collect_geotiff_paths(inputs):
     """Return a sorted list of GeoTIFF paths from files, directories, or globs."""
-    paths = []
-    print(inputs)
+    valid_extensions = {".tif", ".tiff", ".TIF", ".TIFF"}
+    if isinstance(inputs, (str, Path)):
+        inputs = [inputs]
+    found_paths = set()
     for item in inputs:
-        path = Path(item)
-        if path.is_dir():
-            paths.extend(sorted(path.glob("*.tif")))
-            paths.extend(sorted(path.glob("*.tiff")))
+        path_obj = Path(item)
+        if path_obj.is_dir():
+            for ext in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
+                for p in path_obj.glob(ext):
+                    found_paths.add(p.resolve())
         else:
-            matches = glob(item)
-            paths.extend(Path(match) for match in matches)
-    print(paths)
-    unique_paths = sorted({str(path) for path in paths})
+            matches = glob(item, recursive=True)
+            for match in matches:
+                p = Path(match)
+                if p.is_file() and p.suffix in valid_extensions:
+                    found_paths.add(p.resolve())
+
+    unique_paths = sorted(str(p) for p in found_paths)
+    
     if not unique_paths:
         raise ValueError("No GeoTIFF files found.")
+        
     return unique_paths
 
 
@@ -75,22 +83,57 @@ def nan_gaussian_filter(image, valid, sigma=1.0, eps=1e-6):
 
     return blurred.astype(np.float32)
 
-def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling="nearest", gaussian_sigma=1.0, verbose=True):
-    """
-    Read co-registered single-band GeoTIFFs.
+def zscore_normalize(image, valid_mask, clip=3.0, eps=1e-6):
+    out = np.full_like(image, np.nan, dtype=np.float32)
+    valid = valid_mask & np.isfinite(image)
+    if valid.sum() == 0:
+        return out
+    mean = np.nanmean(image[valid])
+    std = np.nanstd(image[valid])
+    if not np.isfinite(mean) or not np.isfinite(std) or std <= eps:
+        return out
+    norm = (image - mean) / (std + eps)
+    if clip is not None and clip > 0:
+        norm = np.clip(norm, -clip, clip)
+    out[valid] = norm[valid]
+    return out.astype(np.float32)
 
-    Returns:
-        stack: float32 array [T, H, W], normalized independently per time step.
-        valid_mask: bool array [H, W], valid for every time step.
-        profile: rasterio profile copied from the first image.
-    """
+def zscore_normalize_with_stats(image, valid_mask, mean, std, clip=0, eps=1e-8):
+    mean = float(mean)
+    std = float(std)
+    if not np.isfinite(mean):
+        raise ValueError(f"Training mean is invalid: {mean}")
+    if not np.isfinite(std) or std <= eps:
+        raise ValueError(f"Training std must be greater than {eps}, but got {std}")
+    normalized = np.full(image.shape, np.nan, dtype=np.float32)
+    current_valid = (valid_mask & np.isfinite(image))
+    normalized[current_valid] = (image[current_valid] - mean) / std
+    if clip is not None and clip > 0:
+        normalized[current_valid] = np.clip(normalized[current_valid], -clip, clip,)
+    return normalized
+
+def read_sar_stack(
+    paths,
+    lower=1.0,
+    upper=99.0,
+    reference_path=None,
+    resampling="nearest",
+    gaussian_sigma=1.0,
+    normalization=None,
+    zscore_clip=0,
+    train_mean=None,
+    train_std=None,
+    histogram_mapping=None,
+    histogram_alpha=0.5,
+    verbose=True,
+):
     arrays = []
     masks = []
     profile = None
     reference_shape = None
     reference_transform = None
     reference_crs = None
-    
+
     paths = [str(p) for p in paths]
     if reference_path is None:
         reference_path = paths[0]
@@ -100,7 +143,7 @@ def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling
         reference_shape = (ref.height, ref.width)
         reference_transform = ref.transform
         reference_crs = ref.crs
-    
+
     if reference_crs is None:
         raise ValueError(f"Reference image has no CRS: {reference_path}")
 
@@ -125,17 +168,12 @@ def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling
     for path in paths:
         with rasterio.open(path) as src:
             image = src.read(1).astype(np.float32)
-            same_grid = (
-                image.shape == reference_shape
-                and src.transform == reference_transform
-                and src.crs == reference_crs
-            )
+            same_grid = (image.shape == reference_shape and src.transform == reference_transform and src.crs == reference_crs)
             if same_grid:
                 aligned = image
             else:
                 if verbose:
                     print("[Aligning]", path, "shape", image.shape, "->", reference_shape, flush=True)
-
                 aligned = np.full(reference_shape, np.nan, dtype=np.float32)
                 reproject(
                     source=image,
@@ -151,32 +189,125 @@ def read_sar_stack(paths, lower=1.0, upper=99.0, reference_path=None, resampling
             valid = np.isfinite(aligned)
             if src.nodata is not None:
                 valid &= aligned != src.nodata
-
             aligned = aligned.astype(np.float32)
             aligned[~valid] = np.nan
             # Apply gaussian blur to input images
             if gaussian_sigma is not None and gaussian_sigma > 0:
-                print("Applying Gaussian blur")
-                aligned = nan_gaussian_filter(
-                    image=aligned,
-                    valid=valid,
-                    sigma=gaussian_sigma,
-                )
+                if verbose:
+                    print(f"Applying Gaussian blur: sigma={gaussian_sigma}", flush=True)
+                aligned = nan_gaussian_filter(image=aligned, valid=valid, sigma=gaussian_sigma)
                 valid = np.isfinite(aligned)
             arrays.append(aligned)
             masks.append(valid)
-
     valid_mask = np.logical_and.reduce(masks)
     if int(valid_mask.sum()) == 0:
-        raise ValueError(
-            "Common valid_mask is empty after alignment. "
-            "Check whether the images actually overlap."
+        raise ValueError("Common valid_mask is empty after alignment. Check whether the images actually overlap.")
+    if histogram_mapping is not None:
+        if verbose:
+            print(
+                "Applying sequence-level histogram mapping: "
+                f"alpha={histogram_alpha}",
+                flush=True,
+            )
+
+        mapped_arrays = []
+
+        for image, mask in zip(arrays, masks):
+            image_valid = (
+                valid_mask
+                & mask
+                & np.isfinite(image)
+            )
+
+            mapped = apply_histogram_mapping_to_image(
+                image=image,
+                valid_mask=image_valid,
+                mapping=histogram_mapping,
+                alpha=histogram_alpha,
+            )
+
+            mapped_arrays.append(mapped)
+
+        arrays = mapped_arrays
+    normalized = []
+
+    for image, mask in zip(arrays, masks):
+        image_valid = (
+            valid_mask
+            & mask
+            & np.isfinite(image)
         )
-    normalized = [
-        percentile_normalize(image, valid_mask & mask, lower=lower, upper=upper)
-        for image, mask in zip(arrays, masks)
-    ]
-    stack = np.stack(normalized, axis=0).astype(np.float32)  # [T, H, W]
+
+        if normalization == "minmax":
+            if verbose:
+                print(
+                    "Min-max normalization: "
+                    "using statistics from each image",
+                    flush=True,
+                )
+
+            norm = percentile_normalize(
+                image,
+                image_valid,
+                lower=lower,
+                upper=upper,
+            )
+
+        elif normalization == "zscore":
+            if verbose:
+                print(
+                    "Z-score normalization: "
+                    "using statistics from each image",
+                    flush=True,
+                )
+
+            norm = zscore_normalize(
+                image,
+                image_valid,
+                clip=zscore_clip,
+            )
+
+        elif normalization == "train_zscore":
+            if train_mean is None or train_std is None:
+                raise ValueError(
+                    "normalization='train_zscore' requires "
+                    "both train_mean and train_std."
+                )
+
+            if verbose:
+                print(
+                    "Z-score normalization: using training "
+                    f"statistics, mean={float(train_mean):.6f}, "
+                    f"std={float(train_std):.6f}",
+                    flush=True,
+                )
+
+            norm = zscore_normalize_with_stats(
+                image=image,
+                valid_mask=image_valid,
+                mean=train_mean,
+                std=train_std,
+                clip=zscore_clip,
+            )
+
+        elif normalization is None:
+            norm = image.copy()
+            norm[~image_valid] = np.nan
+            if verbose:
+                print("No normalization", flush=True)
+        else:
+            raise ValueError(
+                "normalization must be None, 'minmax', "
+                "'zscore', or 'train_zscore'."
+            )
+
+        normalized.append(norm)
+
+    stack = np.stack(
+        normalized,
+        axis=0,
+    ).astype(np.float32)
+
     return stack, valid_mask, profile
 
 
@@ -460,3 +591,156 @@ def iter_chunk_ranges(n, batch_size, shuffle_chunks=False, seed=42):
     for start in starts:
         end = min(start + batch_size, n)
         yield int(start), int(end)
+
+def sample_sar_sequence(
+    stack,
+    valid_mask=None,
+    max_samples=2_000_000,
+    seed=42,
+):
+    stack = np.asarray(stack, dtype=np.float32)
+
+    if stack.ndim != 3:
+        raise ValueError(
+            f"stack must have shape [T, H, W], got {stack.shape}"
+        )
+
+    stride = max(
+        1,
+        int(np.ceil(np.sqrt(stack.size / max_samples))),
+    )
+
+    sampled = stack[:, ::stride, ::stride]
+    valid = np.isfinite(sampled)
+
+    if valid_mask is not None:
+        valid_mask = np.asarray(valid_mask, dtype=bool)
+
+        if valid_mask.ndim == 2:
+            sampled_mask = valid_mask[::stride, ::stride][None, :, :]
+        elif valid_mask.ndim == 3:
+            sampled_mask = valid_mask[:, ::stride, ::stride]
+        else:
+            raise ValueError(
+                "valid_mask must have shape [H, W] or [T, H, W]."
+            )
+
+        valid = valid & sampled_mask
+
+    values = sampled[valid]
+
+    if values.size == 0:
+        raise ValueError("No valid pixels found in SAR sequence.")
+
+    if values.size > max_samples:
+        rng = np.random.default_rng(seed)
+        indices = rng.choice(
+            values.size,
+            size=max_samples,
+            replace=False,
+        )
+        values = values[indices]
+
+    return values.astype(np.float32)
+
+
+def fit_histogram_mapping(
+    train_stack,
+    test_stack,
+    train_valid_mask=None,
+    test_valid_mask=None,
+    n_quantiles=2048,
+    max_samples=2_000_000,
+    quantile_min=0.001,
+    quantile_max=0.999,
+):
+    train_values = sample_sar_sequence(
+        stack=train_stack,
+        valid_mask=train_valid_mask,
+        max_samples=max_samples,
+        seed=42,
+    )
+
+    test_values = sample_sar_sequence(
+        stack=test_stack,
+        valid_mask=test_valid_mask,
+        max_samples=max_samples,
+        seed=43,
+    )
+
+    probabilities = np.linspace(
+        quantile_min,
+        quantile_max,
+        n_quantiles,
+        dtype=np.float64,
+    )
+
+    train_quantiles = np.quantile(
+        train_values,
+        probabilities,
+    )
+
+    test_quantiles = np.quantile(
+        test_values,
+        probabilities,
+    )
+
+    test_knots, inverse = np.unique(
+        test_quantiles,
+        return_inverse=True,
+    )
+
+    train_sums = np.bincount(
+        inverse,
+        weights=train_quantiles,
+    )
+    train_counts = np.bincount(inverse)
+
+    train_knots = train_sums / np.maximum(train_counts, 1)
+
+    if test_knots.size < 2:
+        raise ValueError(
+            "Test sequence has insufficient intensity variation."
+        )
+
+    return {
+        "test_knots": test_knots.astype(np.float32),
+        "train_knots": train_knots.astype(np.float32),
+    }
+
+
+def apply_histogram_mapping_to_image(
+    image,
+    valid_mask,
+    mapping,
+    alpha=0.5,
+):
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be between 0 and 1.")
+
+    image = np.asarray(image, dtype=np.float32)
+    output = image.copy()
+
+    valid = (
+        np.asarray(valid_mask, dtype=bool)
+        & np.isfinite(image)
+    )
+
+    original = image[valid]
+
+    matched = np.interp(
+        original,
+        mapping["test_knots"],
+        mapping["train_knots"],
+        left=mapping["train_knots"][0],
+        right=mapping["train_knots"][-1],
+    ).astype(np.float32)
+
+    output[valid] = (
+        (1.0 - alpha) * original
+        + alpha * matched
+    )
+
+    output[~valid] = np.nan
+
+    return output
